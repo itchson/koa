@@ -20,6 +20,10 @@ enum Command {
     Init,
     Doctor,
     Chat(ChatArgs),
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -45,6 +49,17 @@ enum Command {
 #[derive(Debug, Args)]
 struct ChatArgs {
     prompt: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelCommand {
+    Verify,
+    Manifest {
+        #[arg(long)]
+        revision: String,
+        #[arg(long = "file")]
+        files: Vec<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -151,11 +166,32 @@ fn main() -> Result<()> {
             let runtime = KoaRuntime::open(&root)?;
             println!("{}", runtime.chat(&args.prompt.join(" "))?);
         }
+        Command::Model { command } => handle_model(&root, command)?,
         Command::Session { command } => handle_session(&root, command)?,
         Command::Vault { command } => handle_vault(&root, command)?,
         Command::Tools { command } => handle_tools(&root, command)?,
         Command::Skill { command } => handle_skill(&root, command)?,
         Command::Agent { command } => handle_agent(&root, command)?,
+    }
+    Ok(())
+}
+
+fn handle_model(root: &PathBuf, command: ModelCommand) -> Result<()> {
+    let runtime = KoaRuntime::open(root)?;
+    match command {
+        ModelCommand::Verify => {
+            let report = runtime.verify_model_assets()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.ok() {
+                std::process::exit(2);
+            }
+        }
+        ModelCommand::Manifest { revision, files } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&runtime.write_model_manifest(&revision, &files)?)?
+            );
+        }
     }
     Ok(())
 }

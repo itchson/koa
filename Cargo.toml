@@ -30,6 +30,7 @@ koa-toolbox = { path = "crates/koa-toolbox" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 libc = "0.2"
+memmap2 = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 safetensors = "0.6"
 serde = { version = "1", features = ["derive"] }

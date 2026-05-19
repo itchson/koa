@@ -1,6 +1,6 @@
 # Koa Runtime
 
-Koa (コア) is a Rust-first, CLI-first agentic runtime. The v0.0.1 implementation is intentionally strict: it does not ship mock inference, mock tools, or silent fallbacks.
+Koa is a Rust-first, CLI-first agentic runtime. The v0.0.1 implementation is intentionally strict: it does not ship mock inference, mock tools, or silent fallbacks.
 
 The first native slice contains:
 
@@ -30,7 +30,7 @@ cargo run -p koa-cli -- skill create research.notes "Research Notes" "Capture so
 cargo run -p koa-cli -- agent spawn reviewer "Reviewer" "Review a plan or patch" --output-contract "result.summary, findings, risks, next_actions"
 ```
 
-Architecture notes live in `docs/architecture.md`. Model asset requirements live in `docs/model-assets.md`.
+Architecture notes live in `docs/architecture.md`. Model asset requirements live in `docs/model-assets.md`. Capsule notes live in `docs/capsules.md`.
 
 ## Repository
 

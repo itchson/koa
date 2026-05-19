@@ -8,7 +8,10 @@ use anyhow::{Context, Result, bail};
 use koa_agent::{AgentId, AgentSpec, SkillRef};
 use koa_capsule::{Capsule, CapsuleConfig, CapsuleId, Doctor as CapsuleDoctor};
 use koa_context::{IngestReport, LintReport, Vault};
-use koa_infer::{InferenceRequest, NativeGemmaEngine};
+use koa_infer::{
+    InferenceRequest, ModelAssetReport, ModelManifest, NativeGemmaEngine,
+    verify_model_assets as verify_model_assets_in_dir, write_pinned_manifest,
+};
 use koa_skill::{SkillArtifactKind, SkillBuilder, SkillId};
 use koa_toolbox::{JsonSchema, ToolCall, ToolId, ToolPolicy, ToolSpec};
 use serde::{Deserialize, Serialize};
@@ -245,6 +248,29 @@ impl KoaRuntime {
 
     pub fn paths(&self) -> &KoaPaths {
         &self.paths
+    }
+
+    pub fn verify_model_assets(&self) -> Result<ModelAssetReport> {
+        let config = self.load_config()?;
+        Ok(verify_model_assets_in_dir(
+            self.resolve_workspace_path(&config.inference.model_dir),
+        ))
+    }
+
+    pub fn write_model_manifest(&self, revision: &str, files: &[PathBuf]) -> Result<ModelManifest> {
+        let config = self.load_config()?;
+        let model_dir = self.resolve_workspace_path(&config.inference.model_dir);
+        let manifest = write_pinned_manifest(&model_dir, revision, files)?;
+        self.audit(
+            "model.manifest.write",
+            json!({
+                "model_dir": model_dir,
+                "model_id": &manifest.model_id,
+                "revision": &manifest.revision,
+                "files": &manifest.files,
+            }),
+        )?;
+        Ok(manifest)
     }
 
     pub fn doctor(&self) -> DoctorReport {
