@@ -1,0 +1,15 @@
+[package]
+name = "koa-skill"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Skill manifests, safe artifacts, and tool policy gates for Project Koa."
+
+[dependencies]
+koa-toolbox.workspace = true
+serde.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

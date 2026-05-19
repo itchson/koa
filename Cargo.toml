@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/koa-agent",
+    "crates/koa-capsule",
+    "crates/koa-cli",
+    "crates/koa-context",
+    "crates/koa-core",
+    "crates/koa-infer",
+    "crates/koa-skill",
+    "crates/koa-store",
+    "crates/koa-toolbox",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/itchson/koa"
+version = "0.0.1"
+
+[workspace.dependencies]
+koa-agent = { path = "crates/koa-agent" }
+koa-capsule = { path = "crates/koa-capsule" }
+koa-context = { path = "crates/koa-context" }
+koa-core = { path = "crates/koa-core" }
+koa-infer = { path = "crates/koa-infer" }
+koa-skill = { path = "crates/koa-skill" }
+koa-store = { path = "crates/koa-store" }
+koa-toolbox = { path = "crates/koa-toolbox" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+safetensors = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "1"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+toml = "0.9"
+uuid = { version = "1", features = ["v4", "serde"] }
+walkdir = "2"

@@ -1,0 +1,13 @@
+[package]
+name = "koa-toolbox"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Shared tool manifest, policy, and audit types for Project Koa."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "koa-agent"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Agent specifications and lifecycle registry for Project Koa."
+
+[dependencies]
+koa-skill.workspace = true
+koa-toolbox.workspace = true
+serde.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "koa-core"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+koa-agent.workspace = true
+koa-capsule.workspace = true
+koa-context.workspace = true
+koa-infer.workspace = true
+koa-skill.workspace = true
+koa-store.workspace = true
+koa-toolbox.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
