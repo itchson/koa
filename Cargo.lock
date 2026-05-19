@@ -604,6 +604,7 @@ dependencies = [
  "koa-skill",
  "koa-store",
  "koa-toolbox",
+ "safetensors",
  "serde",
  "serde_json",
  "sha2",

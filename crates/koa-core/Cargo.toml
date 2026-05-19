@@ -5,6 +5,9 @@ license.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[features]
+cuda = ["koa-infer/cuda"]
+
 [dependencies]
 anyhow.workspace = true
 koa-agent.workspace = true
@@ -22,4 +25,5 @@ uuid.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+safetensors.workspace = true
 tempfile.workspace = true

@@ -9,7 +9,7 @@ use koa_agent::{AgentId, AgentSpec, SkillRef};
 use koa_capsule::{Capsule, CapsuleConfig, CapsuleId, Doctor as CapsuleDoctor};
 use koa_context::{IngestReport, LintReport, Vault};
 use koa_infer::{
-    InferenceRequest, ModelAssetReport, ModelManifest, NativeGemmaEngine,
+    InferenceDoctor, InferenceRequest, ModelAssetReport, ModelManifest, NativeGemmaEngine,
     verify_model_assets as verify_model_assets_in_dir, write_pinned_manifest,
 };
 use koa_skill::{SkillArtifactKind, SkillBuilder, SkillId};
@@ -188,6 +188,25 @@ pub struct CapsuleHostDoctor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatOptions {
+    pub max_new_tokens: usize,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub seed: u64,
+}
+
+impl Default for ChatOptions {
+    fn default() -> Self {
+        Self {
+            max_new_tokens: 512,
+            temperature: 0.7,
+            top_p: 0.95,
+            seed: 42,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolManifest {
     pub spec: ToolSpec,
     pub output_schema: Value,
@@ -252,15 +271,19 @@ impl KoaRuntime {
 
     pub fn verify_model_assets(&self) -> Result<ModelAssetReport> {
         let config = self.load_config()?;
-        Ok(verify_model_assets_in_dir(
-            self.resolve_workspace_path(&config.inference.model_dir),
-        ))
+        let mut report =
+            verify_model_assets_in_dir(self.resolve_workspace_path(&config.inference.model_dir));
+        verify_config_matches_model_report(&config, &mut report);
+        Ok(report)
     }
 
     pub fn write_model_manifest(&self, revision: &str, files: &[PathBuf]) -> Result<ModelManifest> {
-        let config = self.load_config()?;
+        let mut config = self.load_config()?;
         let model_dir = self.resolve_workspace_path(&config.inference.model_dir);
         let manifest = write_pinned_manifest(&model_dir, revision, files)?;
+        config.inference.model_id = manifest.model_id.clone();
+        config.inference.revision = manifest.revision.clone();
+        self.save_config(&config)?;
         self.audit(
             "model.manifest.write",
             json!({
@@ -273,6 +296,16 @@ impl KoaRuntime {
         Ok(manifest)
     }
 
+    pub fn model_doctor(&self) -> Result<InferenceDoctor> {
+        let config = self.load_config()?;
+        let mut doctor = NativeGemmaEngine::doctor(
+            self.resolve_workspace_path(&config.inference.model_dir),
+            config.inference.require_cuda,
+        );
+        verify_config_matches_inference_doctor(&config, &mut doctor);
+        Ok(doctor)
+    }
+
     pub fn doctor(&self) -> DoctorReport {
         let mut report = DoctorReport {
             workspace_ok: self.paths.state.is_dir() && self.paths.config.is_file(),
@@ -282,18 +315,13 @@ impl KoaRuntime {
             toolbox_ok: false,
             problems: Vec::new(),
         };
-        let config = match self.load_config() {
-            Ok(config) => config,
+        let infer = match self.model_doctor() {
+            Ok(infer) => infer,
             Err(err) => {
-                report.problems.push(format!("config: {err}"));
+                report.problems.push(format!("inference: {err}"));
                 return report;
             }
         };
-
-        let infer = NativeGemmaEngine::doctor(
-            self.resolve_workspace_path(&config.inference.model_dir),
-            config.inference.require_cuda,
-        );
         report.inference_ok = infer.healthy();
         report.problems.extend(
             infer
@@ -332,6 +360,22 @@ impl KoaRuntime {
     }
 
     pub fn chat(&self, prompt: &str) -> Result<String> {
+        self.chat_with_options(prompt, ChatOptions::default())
+    }
+
+    pub fn chat_with_options(&self, prompt: &str, options: ChatOptions) -> Result<String> {
+        if prompt.trim().is_empty() {
+            bail!("prompt cannot be empty");
+        }
+        if options.max_new_tokens == 0 {
+            bail!("max_new_tokens must be greater than zero");
+        }
+        if !options.temperature.is_finite() || options.temperature < 0.0 {
+            bail!("temperature must be finite and greater than or equal to zero");
+        }
+        if !options.top_p.is_finite() || options.top_p <= 0.0 || options.top_p > 1.0 {
+            bail!("top_p must be finite and within (0, 1]");
+        }
         let report = self.doctor();
         if !report.inference_ok {
             bail!(
@@ -344,10 +388,10 @@ impl KoaRuntime {
             NativeGemmaEngine::load(self.resolve_workspace_path(&config.inference.model_dir))?;
         let response = engine.generate(InferenceRequest {
             prompt: prompt.to_string(),
-            max_new_tokens: 512,
-            temperature: 0.7,
-            top_p: 0.95,
-            seed: 42,
+            max_new_tokens: options.max_new_tokens,
+            temperature: options.temperature,
+            top_p: options.top_p,
+            seed: options.seed,
         })?;
         self.audit(
             "runtime.chat",
@@ -933,6 +977,44 @@ fn run_wsl_probe(distribution: &str, script: &str) -> Result<()> {
     }
 }
 
+fn verify_config_matches_model_report(config: &KoaConfig, report: &mut ModelAssetReport) {
+    if let Some(model_id) = &report.model_id {
+        if model_id != &config.inference.model_id {
+            report.problems.push(format!(
+                "config inference.model_id `{}` does not match model manifest id `{model_id}`",
+                config.inference.model_id
+            ));
+        }
+    }
+    if let Some(revision) = &report.revision {
+        if revision != &config.inference.revision {
+            report.problems.push(format!(
+                "config inference.revision `{}` does not match model manifest revision `{revision}`",
+                config.inference.revision
+            ));
+        }
+    }
+}
+
+fn verify_config_matches_inference_doctor(config: &KoaConfig, doctor: &mut InferenceDoctor) {
+    if let Some(model_id) = &doctor.model_id {
+        if model_id != &config.inference.model_id {
+            doctor.problems.push(format!(
+                "config inference.model_id `{}` does not match model manifest id `{model_id}`",
+                config.inference.model_id
+            ));
+        }
+    }
+    if let Some(revision) = &doctor.revision {
+        if revision != &config.inference.revision {
+            doctor.problems.push(format!(
+                "config inference.revision `{}` does not match model manifest revision `{revision}`",
+                config.inference.revision
+            ));
+        }
+    }
+}
+
 fn unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -963,5 +1045,97 @@ mod tests {
         let runtime = KoaRuntime::init(temp.path()).expect("init");
         assert!(runtime.paths().config.is_file());
         assert_eq!(runtime.list_sessions().expect("sessions").len(), 1);
+    }
+
+    #[test]
+    fn write_model_manifest_updates_config_revision() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = KoaRuntime::init(temp.path()).expect("init");
+        seed_model_dir(&runtime.paths().models.join("gemma-4-E2B-it"));
+
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        runtime
+            .write_model_manifest(revision, &[])
+            .expect("manifest");
+
+        let config = runtime.load_config().expect("config");
+        assert_eq!(config.inference.model_id, koa_infer::REQUIRED_MODEL_ID);
+        assert_eq!(config.inference.revision, revision);
+        let report = runtime.verify_model_assets().expect("verify");
+        assert!(
+            report
+                .problems
+                .iter()
+                .all(|problem| !problem.contains("does not match"))
+        );
+    }
+
+    #[test]
+    fn model_doctor_reports_config_manifest_revision_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = KoaRuntime::init(temp.path()).expect("init");
+        seed_model_dir(&runtime.paths().models.join("gemma-4-E2B-it"));
+
+        runtime
+            .write_model_manifest("0123456789abcdef0123456789abcdef01234567", &[])
+            .expect("manifest");
+        let mut config = runtime.load_config().expect("config");
+        config.inference.revision = "ffffffffffffffffffffffffffffffffffffffff".to_string();
+        runtime.save_config(&config).expect("save config");
+
+        let doctor = runtime.model_doctor().expect("doctor");
+        assert!(!doctor.healthy());
+        assert!(doctor.problems.iter().any(|problem| {
+            problem.contains("config inference.revision")
+                && problem.contains("does not match model manifest revision")
+        }));
+    }
+
+    #[test]
+    fn chat_rejects_blank_prompt_before_runtime_doctor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = KoaRuntime::init(temp.path()).expect("init");
+        let err = runtime.chat("   ").expect_err("blank prompt");
+        assert_eq!(err.to_string(), "prompt cannot be empty");
+    }
+
+    fn seed_model_dir(model_dir: &Path) {
+        fs::create_dir_all(model_dir).expect("model dir");
+        fs::write(
+            model_dir.join("config.json"),
+            br#"{"model_type":"gemma4","text_config":{"model_type":"gemma4_text"}}"#,
+        )
+        .expect("config");
+        fs::write(
+            model_dir.join("tokenizer_config.json"),
+            br#"{"chat_template":"{{ messages }}"}"#,
+        )
+        .expect("tokenizer config");
+        fs::write(model_dir.join("tokenizer.json"), br#"{"version":"1.0"}"#).expect("tokenizer");
+        fs::write(
+            model_dir.join("chat_template.jinja"),
+            br#"{% for message in messages %}{{ message.content }}{% endfor %}"#,
+        )
+        .expect("chat template");
+        fs::write(
+            model_dir.join("generation_config.json"),
+            br#"{"max_new_tokens":128}"#,
+        )
+        .expect("generation config");
+        fs::write(
+            model_dir.join("processor_config.json"),
+            br#"{"processor_class":"Gemma4Processor"}"#,
+        )
+        .expect("processor config");
+        write_test_safetensors(&model_dir.join("model.safetensors"));
+    }
+
+    fn write_test_safetensors(path: &Path) {
+        let data = 1.0f32.to_le_bytes();
+        let view = safetensors::tensor::TensorView::new(safetensors::Dtype::F32, vec![1], &data)
+            .expect("tensor view");
+        let bytes =
+            safetensors::serialize([("weight".to_string(), view)], None).expect("safetensors");
+        fs::write(path, bytes).expect("weights");
     }
 }

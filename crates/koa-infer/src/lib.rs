@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use memmap2::MmapOptions;
-use safetensors::SafeTensors;
+use safetensors::{Dtype, SafeTensors};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -106,6 +106,8 @@ pub struct InferenceResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceDoctor {
     pub model_dir: PathBuf,
+    pub model_id: Option<String>,
+    pub revision: Option<String>,
     pub model_id_ok: bool,
     pub revision_pinned: bool,
     pub manifest_ok: bool,
@@ -114,6 +116,9 @@ pub struct InferenceDoctor {
     pub safetensors_ok: bool,
     pub cuda_requested: bool,
     pub cuda_compiled: bool,
+    pub executor_ok: bool,
+    pub executor_backend: Option<String>,
+    pub executor_problem: Option<String>,
     pub problems: Vec<String>,
 }
 
@@ -127,6 +132,7 @@ impl InferenceDoctor {
             && self.tokenizer_ok
             && self.safetensors_ok
             && (!self.cuda_requested || self.cuda_compiled)
+            && self.executor_ok
     }
 }
 
@@ -325,6 +331,9 @@ impl NativeGemmaEngine {
         let manifest = load_manifest(&model_dir)?;
         validate_manifest(&model_dir, &manifest)?;
         validate_config(&model_dir)?;
+        validate_generation_config(&model_dir)?;
+        validate_tokenizer_config(&model_dir)?;
+        validate_chat_template(&model_dir)?;
         let tokenizer_path = model_dir.join("tokenizer.json");
         let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|err| {
             anyhow::anyhow!(
@@ -333,6 +342,7 @@ impl NativeGemmaEngine {
             )
         })?;
         validate_safetensors(&model_dir, &manifest)?;
+        validate_safetensors_metadata(&model_dir, &manifest)?;
         Ok(Self {
             model_dir,
             manifest,
@@ -344,6 +354,8 @@ impl NativeGemmaEngine {
         let model_dir = model_dir.into();
         let mut doctor = InferenceDoctor {
             model_dir: model_dir.clone(),
+            model_id: None,
+            revision: None,
             model_id_ok: false,
             revision_pinned: false,
             manifest_ok: false,
@@ -352,10 +364,18 @@ impl NativeGemmaEngine {
             safetensors_ok: false,
             cuda_requested: require_cuda,
             cuda_compiled: cfg!(feature = "cuda"),
+            executor_ok: false,
+            executor_backend: None,
+            executor_problem: Some(
+                "native Gemma 4 executor is not complete; Koa refuses to fabricate model output"
+                    .to_string(),
+            ),
             problems: Vec::new(),
         };
 
         let assets = verify_model_assets(model_dir.clone());
+        doctor.model_id = assets.model_id.clone();
+        doctor.revision = assets.revision.clone();
         doctor.model_id_ok = assets.model_id.as_deref() == Some(REQUIRED_MODEL_ID);
         doctor.revision_pinned = assets.revision_pinned;
         doctor.manifest_ok = assets.manifest_ok && assets.checked_files.iter().all(|file| file.ok);
@@ -366,6 +386,23 @@ impl NativeGemmaEngine {
             doctor.problems.push(err.to_string());
         } else {
             doctor.config_ok = true;
+        }
+        if let Err(err) = validate_generation_config(&model_dir) {
+            doctor.problems.push(err.to_string());
+        }
+        if let Err(err) = validate_tokenizer_config(&model_dir) {
+            doctor.problems.push(err.to_string());
+        }
+        if let Err(err) = validate_chat_template(&model_dir) {
+            doctor.problems.push(err.to_string());
+        }
+        if doctor.safetensors_ok {
+            match load_manifest(&model_dir)
+                .and_then(|manifest| validate_safetensors_metadata(&model_dir, &manifest))
+            {
+                Ok(()) => {}
+                Err(err) => doctor.problems.push(err.to_string()),
+            }
         }
 
         match Tokenizer::from_file(model_dir.join("tokenizer.json")) {
@@ -379,6 +416,9 @@ impl NativeGemmaEngine {
             doctor
                 .problems
                 .push("koa-infer was not compiled with the `cuda` feature".to_string());
+        }
+        if let Some(problem) = &doctor.executor_problem {
+            doctor.problems.push(problem.clone());
         }
         doctor
     }
@@ -433,24 +473,214 @@ fn validate_manifest(model_dir: &Path, manifest: &ModelManifest) -> Result<()> {
 }
 
 fn validate_config(model_dir: &Path) -> Result<()> {
-    let path = model_dir.join("config.json");
+    let value = read_json_file(model_dir, REQUIRED_CONFIG_FILE)?;
+    expect_str(&value, "/model_type", "gemma4", "config.json")?;
+    expect_str(
+        &value,
+        "/architectures/0",
+        "Gemma4ForConditionalGeneration",
+        "config.json",
+    )?;
+    expect_str(&value, "/dtype", "bfloat16", "config.json")?;
+    expect_str(
+        &value,
+        "/text_config/model_type",
+        "gemma4_text",
+        "config.json",
+    )?;
+    expect_str(&value, "/text_config/dtype", "bfloat16", "config.json")?;
+    expect_u64(&value, "/text_config/vocab_size", 262_144, "config.json")?;
+    expect_u64(&value, "/text_config/hidden_size", 1_536, "config.json")?;
+    expect_u64(
+        &value,
+        "/text_config/hidden_size_per_layer_input",
+        256,
+        "config.json",
+    )?;
+    expect_u64(&value, "/text_config/num_hidden_layers", 35, "config.json")?;
+    expect_u64(&value, "/text_config/num_attention_heads", 8, "config.json")?;
+    expect_u64(&value, "/text_config/num_key_value_heads", 1, "config.json")?;
+    expect_u64(
+        &value,
+        "/text_config/num_kv_shared_layers",
+        20,
+        "config.json",
+    )?;
+    expect_u64(&value, "/text_config/head_dim", 256, "config.json")?;
+    expect_u64(&value, "/text_config/global_head_dim", 512, "config.json")?;
+    expect_u64(
+        &value,
+        "/text_config/intermediate_size",
+        6_144,
+        "config.json",
+    )?;
+    expect_u64(&value, "/text_config/sliding_window", 512, "config.json")?;
+    expect_u64(
+        &value,
+        "/text_config/max_position_embeddings",
+        131_072,
+        "config.json",
+    )?;
+    expect_bool(
+        &value,
+        "/text_config/tie_word_embeddings",
+        true,
+        "config.json",
+    )?;
+    expect_bool(&value, "/text_config/use_cache", true, "config.json")?;
+    expect_bool(
+        &value,
+        "/text_config/use_double_wide_mlp",
+        true,
+        "config.json",
+    )?;
+    expect_f64(
+        &value,
+        "/text_config/final_logit_softcapping",
+        30.0,
+        "config.json",
+    )?;
+    expect_str(
+        &value,
+        "/text_config/rope_parameters/sliding_attention/rope_type",
+        "default",
+        "config.json",
+    )?;
+    expect_f64(
+        &value,
+        "/text_config/rope_parameters/sliding_attention/rope_theta",
+        10_000.0,
+        "config.json",
+    )?;
+    expect_str(
+        &value,
+        "/text_config/rope_parameters/full_attention/rope_type",
+        "proportional",
+        "config.json",
+    )?;
+    expect_f64(
+        &value,
+        "/text_config/rope_parameters/full_attention/rope_theta",
+        1_000_000.0,
+        "config.json",
+    )?;
+    expect_f64(
+        &value,
+        "/text_config/rope_parameters/full_attention/partial_rotary_factor",
+        0.25,
+        "config.json",
+    )?;
+
+    let layer_types = value
+        .pointer("/text_config/layer_types")
+        .and_then(Value::as_array)
+        .with_context(|| "config.json /text_config/layer_types must be an array")?;
+    if layer_types.len() != 35 {
+        bail!(
+            "config.json /text_config/layer_types must contain 35 entries, found {}",
+            layer_types.len()
+        );
+    }
+    for (index, value) in layer_types.iter().enumerate() {
+        let expected = if index % 5 == 4 {
+            "full_attention"
+        } else {
+            "sliding_attention"
+        };
+        if value.as_str() != Some(expected) {
+            bail!(
+                "config.json /text_config/layer_types/{index} must be `{expected}`, found `{}`",
+                value.as_str().unwrap_or("<non-string>")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_generation_config(model_dir: &Path) -> Result<()> {
+    let value = read_json_file(model_dir, REQUIRED_GENERATION_CONFIG_FILE)?;
+    expect_u64(&value, "/bos_token_id", 2, REQUIRED_GENERATION_CONFIG_FILE)?;
+    expect_u64(&value, "/pad_token_id", 0, REQUIRED_GENERATION_CONFIG_FILE)?;
+    expect_u64(&value, "/top_k", 64, REQUIRED_GENERATION_CONFIG_FILE)?;
+    expect_f64(&value, "/top_p", 0.95, REQUIRED_GENERATION_CONFIG_FILE)?;
+    expect_f64(&value, "/temperature", 1.0, REQUIRED_GENERATION_CONFIG_FILE)?;
+    let eos = value
+        .pointer("/eos_token_id")
+        .and_then(Value::as_array)
+        .with_context(|| "generation_config.json /eos_token_id must be an array")?;
+    let actual = eos.iter().map(Value::as_u64).collect::<Option<Vec<_>>>();
+    if actual.as_deref() != Some(&[1, 106, 50]) {
+        bail!("generation_config.json /eos_token_id must be [1, 106, 50]");
+    }
+    Ok(())
+}
+
+fn validate_tokenizer_config(model_dir: &Path) -> Result<()> {
+    let value = read_json_file(model_dir, REQUIRED_TOKENIZER_CONFIG_FILE)?;
+    expect_str(
+        &value,
+        "/processor_class",
+        "Gemma4Processor",
+        REQUIRED_TOKENIZER_CONFIG_FILE,
+    )?;
+    expect_str(
+        &value,
+        "/tokenizer_class",
+        "GemmaTokenizer",
+        REQUIRED_TOKENIZER_CONFIG_FILE,
+    )?;
+    expect_str(
+        &value,
+        "/padding_side",
+        "left",
+        REQUIRED_TOKENIZER_CONFIG_FILE,
+    )?;
+    expect_str(
+        &value,
+        "/bos_token",
+        "<bos>",
+        REQUIRED_TOKENIZER_CONFIG_FILE,
+    )?;
+    expect_str(
+        &value,
+        "/eos_token",
+        "<eos>",
+        REQUIRED_TOKENIZER_CONFIG_FILE,
+    )?;
+    expect_str(
+        &value,
+        "/pad_token",
+        "<pad>",
+        REQUIRED_TOKENIZER_CONFIG_FILE,
+    )?;
+    if value
+        .pointer("/response_schema/properties/tool_calls")
+        .is_none()
+    {
+        bail!("tokenizer_config.json must include response_schema.properties.tool_calls");
+    }
+    Ok(())
+}
+
+fn validate_chat_template(model_dir: &Path) -> Result<()> {
+    let path = model_dir.join(REQUIRED_CHAT_TEMPLATE_FILE);
     let text =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let value: Value = serde_json::from_str(&text)?;
-    let model_type = value
-        .get("model_type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if model_type != "gemma4" {
-        bail!("config.json model_type must be `gemma4`, found `{model_type}`");
-    }
-    let text_type = value
-        .get("text_config")
-        .and_then(|text| text.get("model_type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if text_type != "gemma4_text" {
-        bail!("config.json text_config.model_type must be `gemma4_text`, found `{text_type}`");
+    for marker in [
+        "<|turn>",
+        "<turn|>",
+        "<|tool_call>",
+        "<tool_call|>",
+        "<|tool_response>",
+        "<tool_response|>",
+        "<|image|>",
+        "<|audio|>",
+        "enable_thinking",
+        "add_generation_prompt",
+    ] {
+        if !text.contains(marker) {
+            bail!("chat_template.jinja must contain `{marker}`");
+        }
     }
     Ok(())
 }
@@ -478,6 +708,77 @@ fn validate_safetensors(model_dir: &Path, manifest: &ModelManifest) -> Result<()
     Ok(())
 }
 
+fn validate_safetensors_metadata(model_dir: &Path, manifest: &ModelManifest) -> Result<()> {
+    let mut tensor_count = 0usize;
+    let mut problems = Vec::new();
+    for file in &manifest.files {
+        if !file.path.ends_with(".safetensors") {
+            continue;
+        }
+        let path = model_dir.join(&file.path);
+        let file =
+            File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
+        let mmap = unsafe { MmapOptions::new().map(&file) }
+            .with_context(|| format!("failed to mmap {}", path.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .with_context(|| format!("invalid safetensors file {}", path.display()))?;
+        tensor_count += tensors.len();
+        for (name, tensor) in tensors.iter() {
+            if tensor.dtype() != Dtype::BF16 {
+                problems.push(format!(
+                    "tensor `{name}` must use BF16 dtype, found {}",
+                    tensor.dtype()
+                ));
+            }
+        }
+        for (name, shape) in [
+            (
+                "model.language_model.embed_tokens.weight",
+                &[262_144, 1_536][..],
+            ),
+            (
+                "model.language_model.embed_tokens_per_layer.weight",
+                &[262_144, 8_960][..],
+            ),
+            (
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+                &[2_048, 1_536][..],
+            ),
+            (
+                "model.language_model.layers.34.self_attn.q_proj.weight",
+                &[4_096, 1_536][..],
+            ),
+            (
+                "model.embed_vision.embedding_projection.weight",
+                &[1_536, 768][..],
+            ),
+            (
+                "model.embed_audio.embedding_projection.weight",
+                &[1_536, 1_536][..],
+            ),
+        ] {
+            match tensors.tensor(name) {
+                Ok(tensor) if tensor.shape() == shape => {}
+                Ok(tensor) => problems.push(format!(
+                    "tensor `{name}` must have shape {:?}, found {:?}",
+                    shape,
+                    tensor.shape()
+                )),
+                Err(_) => problems.push(format!("required tensor `{name}` is missing")),
+            }
+        }
+    }
+    if tensor_count != 2_011 {
+        problems.push(format!(
+            "Gemma 4 E2B-it safetensors must contain 2011 tensors, found {tensor_count}"
+        ));
+    }
+    if !problems.is_empty() {
+        bail!("{}", problems.join("; "));
+    }
+    Ok(())
+}
+
 pub fn is_pinned_revision(revision: &str) -> bool {
     let revision = revision.trim();
     revision.len() == 40 && revision.chars().all(|ch| ch.is_ascii_hexdigit())
@@ -498,6 +799,61 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn read_json_file(model_dir: &Path, file_name: &str) -> Result<Value> {
+    let path = model_dir.join(file_name);
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn expect_str(value: &Value, pointer: &str, expected: &str, file_name: &str) -> Result<()> {
+    let actual = value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if actual != expected {
+        bail!("{file_name} {pointer} must be `{expected}`, found `{actual}`");
+    }
+    Ok(())
+}
+
+fn expect_u64(value: &Value, pointer: &str, expected: u64, file_name: &str) -> Result<()> {
+    let actual = value.pointer(pointer).and_then(Value::as_u64);
+    if actual != Some(expected) {
+        bail!(
+            "{file_name} {pointer} must be {expected}, found {}",
+            actual
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<missing-or-non-integer>".to_string())
+        );
+    }
+    Ok(())
+}
+
+fn expect_bool(value: &Value, pointer: &str, expected: bool, file_name: &str) -> Result<()> {
+    let actual = value.pointer(pointer).and_then(Value::as_bool);
+    if actual != Some(expected) {
+        bail!(
+            "{file_name} {pointer} must be {expected}, found {}",
+            actual
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<missing-or-non-boolean>".to_string())
+        );
+    }
+    Ok(())
+}
+
+fn expect_f64(value: &Value, pointer: &str, expected: f64, file_name: &str) -> Result<()> {
+    let actual = value.pointer(pointer).and_then(Value::as_f64);
+    match actual {
+        Some(actual) if (actual - expected).abs() <= f64::EPSILON => Ok(()),
+        Some(actual) => {
+            bail!("{file_name} {pointer} must be {expected}, found {actual}");
+        }
+        None => bail!("{file_name} {pointer} must be {expected}, found <missing-or-non-number>"),
+    }
 }
 
 fn ensure_manifest_shape(manifest: &ModelManifest) -> Result<()> {
@@ -804,6 +1160,53 @@ sha256 = "{}"
                 .problems
                 .iter()
                 .any(|problem| { problem.contains("must be relative") && problem.contains("..") })
+        );
+    }
+
+    #[test]
+    fn doctor_is_unhealthy_until_native_executor_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_model_dir(temp.path());
+        write_pinned_manifest(temp.path(), "0123456789abcdef0123456789abcdef01234567", &[])
+            .expect("manifest");
+
+        let doctor = NativeGemmaEngine::doctor(temp.path(), false);
+        assert!(!doctor.healthy());
+        assert!(!doctor.executor_ok);
+        assert!(
+            doctor
+                .executor_problem
+                .as_deref()
+                .unwrap_or_default()
+                .contains("executor is not complete")
+        );
+    }
+
+    #[test]
+    fn doctor_reports_strict_sidecar_and_tensor_metadata_problems() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        seed_model_dir(temp.path());
+        write_pinned_manifest(temp.path(), "0123456789abcdef0123456789abcdef01234567", &[])
+            .expect("manifest");
+
+        let doctor = NativeGemmaEngine::doctor(temp.path(), false);
+        assert!(
+            doctor
+                .problems
+                .iter()
+                .any(|problem| problem.contains("generation_config.json"))
+        );
+        assert!(
+            doctor
+                .problems
+                .iter()
+                .any(|problem| problem.contains("chat_template.jinja must contain `<|turn>`"))
+        );
+        assert!(
+            doctor
+                .problems
+                .iter()
+                .any(|problem| problem.contains("2011 tensors"))
         );
     }
 

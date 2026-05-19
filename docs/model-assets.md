@@ -65,3 +65,20 @@ cargo run -p koa-cli -- model verify
 ```
 
 `koa model verify` exits with status 2 when the model directory, manifest, pinned revision, required file declarations, checksums, or safetensors files are invalid.
+
+Check full inference readiness with:
+
+```powershell
+cargo run -p koa-cli -- model doctor
+```
+
+`koa model doctor` also validates the pinned runtime config, strict Gemma 4 E2B-it config fields, generation/tokenizer/chat-template sidecars, critical safetensors tensor metadata, CUDA feature wiring, and native executor readiness. v0.0.1 keeps `executor_ok` false until the real Gemma 4 executor exists, so a fully verified asset set can still fail readiness honestly.
+
+Current strict readiness anchors:
+
+- `architectures[0] = "Gemma4ForConditionalGeneration"`
+- text config: 35 layers, `hidden_size = 1536`, `num_attention_heads = 8`, `num_key_value_heads = 1`, `head_dim = 256`, `sliding_window = 512`
+- attention pattern: full attention at layers 4, 9, 14, 19, 24, 29, and 34
+- generation EOS ids: `[1, 106, 50]`
+- chat template markers for turns, tool calls, tool responses, image/audio sentinels, thinking, and generation prompts
+- safetensors metadata: 2011 BF16 tensors plus critical language, vision, and audio projection shapes

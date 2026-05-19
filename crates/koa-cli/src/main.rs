@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use koa_core::KoaRuntime;
+use koa_core::{ChatOptions, KoaRuntime};
 use serde_json::json;
 
 #[derive(Debug, Parser)]
@@ -48,11 +48,20 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct ChatArgs {
+    #[arg(long, default_value_t = 512)]
+    max_new_tokens: usize,
+    #[arg(long, default_value_t = 0.7)]
+    temperature: f32,
+    #[arg(long, default_value_t = 0.95)]
+    top_p: f32,
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
     prompt: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
 enum ModelCommand {
+    Doctor,
     Verify,
     Manifest {
         #[arg(long)]
@@ -164,7 +173,22 @@ fn main() -> Result<()> {
         }
         Command::Chat(args) => {
             let runtime = KoaRuntime::open(&root)?;
-            println!("{}", runtime.chat(&args.prompt.join(" "))?);
+            let prompt = args.prompt.join(" ");
+            if prompt.trim().is_empty() {
+                anyhow::bail!("prompt cannot be empty");
+            }
+            println!(
+                "{}",
+                runtime.chat_with_options(
+                    &prompt,
+                    ChatOptions {
+                        max_new_tokens: args.max_new_tokens,
+                        temperature: args.temperature,
+                        top_p: args.top_p,
+                        seed: args.seed,
+                    },
+                )?
+            );
         }
         Command::Model { command } => handle_model(&root, command)?,
         Command::Session { command } => handle_session(&root, command)?,
@@ -179,6 +203,13 @@ fn main() -> Result<()> {
 fn handle_model(root: &PathBuf, command: ModelCommand) -> Result<()> {
     let runtime = KoaRuntime::open(root)?;
     match command {
+        ModelCommand::Doctor => {
+            let report = runtime.model_doctor()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.healthy() {
+                std::process::exit(2);
+            }
+        }
         ModelCommand::Verify => {
             let report = runtime.verify_model_assets()?;
             println!("{}", serde_json::to_string_pretty(&report)?);

@@ -9,6 +9,9 @@ version.workspace = true
 name = "koa"
 path = "src/main.rs"
 
+[features]
+cuda = ["koa-core/cuda"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

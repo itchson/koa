@@ -43,6 +43,34 @@ fn model_manifest_rejects_branch_like_revision() {
     assert!(stderr(&output).contains("40-character Hugging Face commit SHA"));
 }
 
+#[test]
+fn model_doctor_exits_two_while_executor_is_unavailable() {
+    let root = tempfile::tempdir().expect("tempdir");
+    assert!(koa(root.path(), ["init"]).status.success());
+    seed_model_dir(&root.path().join(".koa/models/gemma-4-E2B-it"));
+    assert!(
+        koa(root.path(), ["model", "manifest", "--revision", REVISION])
+            .status
+            .success()
+    );
+
+    let output = koa(root.path(), ["model", "doctor"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stdout(&output).contains("\"executor_ok\": false"));
+    assert!(stdout(&output).contains("executor is not complete"));
+}
+
+#[test]
+fn chat_without_prompt_fails_before_readiness_checks() {
+    let root = tempfile::tempdir().expect("tempdir");
+    assert!(koa(root.path(), ["init"]).status.success());
+
+    let output = koa(root.path(), ["chat"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("prompt cannot be empty"));
+    assert!(!stderr(&output).contains("native inference gate failed"));
+}
+
 fn koa<const N: usize>(root: &Path, args: [&str; N]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_koa"))
         .arg("--root")

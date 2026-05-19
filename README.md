@@ -18,11 +18,14 @@ The first native slice contains:
 ```powershell
 cargo run -p koa-cli -- init
 cargo run -p koa-cli -- doctor
+cargo run -p koa-cli -- model doctor
 ```
 
 Useful commands:
 
 ```powershell
+cargo run -p koa-cli -- model manifest --revision <exact-40-character-hugging-face-commit-sha>
+cargo run -p koa-cli -- model verify
 cargo run -p koa-cli -- session list
 cargo run -p koa-cli -- vault ingest .\README.md
 cargo run -p koa-cli -- vault search Koa
