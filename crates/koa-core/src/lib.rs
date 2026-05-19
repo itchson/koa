@@ -306,6 +306,13 @@ impl KoaRuntime {
         Ok(doctor)
     }
 
+    pub fn capsule_doctor(&self) -> Result<CapsuleHostDoctor> {
+        let config = self.load_config()?;
+        Ok(capsule_runtime_doctor(
+            self.resolve_workspace_path(&config.capsule.base_rootfs),
+        ))
+    }
+
     pub fn doctor(&self) -> DoctorReport {
         let mut report = DoctorReport {
             workspace_ok: self.paths.state.is_dir() && self.paths.config.is_file(),
@@ -330,7 +337,13 @@ impl KoaRuntime {
                 .map(|problem| format!("inference: {problem}")),
         );
 
-        let capsule = capsule_host_doctor();
+        let capsule = match self.capsule_doctor() {
+            Ok(capsule) => capsule,
+            Err(err) => {
+                report.problems.push(format!("capsule: {err}"));
+                return report;
+            }
+        };
         report.capsule_ok = capsule.ok;
         report.problems.extend(
             capsule
@@ -711,7 +724,6 @@ impl KoaRuntime {
     fn create_capsule_metadata(&self, session: &SessionRecord) -> Result<()> {
         let config = self.load_config()?;
         let lower = self.resolve_workspace_path(&config.capsule.base_rootfs);
-        fs::create_dir_all(&lower)?;
         let state = self.paths.capsules.join("state");
         let capsule_id = CapsuleId::new(&session.id).map_err(|err| anyhow::anyhow!(err))?;
         Capsule::create(
@@ -894,6 +906,61 @@ fn capsule_host_doctor() -> CapsuleHostDoctor {
     }
 }
 
+fn capsule_runtime_doctor(base_rootfs: PathBuf) -> CapsuleHostDoctor {
+    let mut report = capsule_host_doctor();
+    let mut rootfs_ok = true;
+
+    if base_rootfs.is_dir() {
+        report
+            .checks
+            .push(format!("base_rootfs: pass ({})", base_rootfs.display()));
+    } else {
+        rootfs_ok = false;
+        report
+            .checks
+            .push(format!("base_rootfs: fail ({})", base_rootfs.display()));
+        report.problems.push(format!(
+            "base rootfs {} is missing; Koa will not synthesize a fake rootfs",
+            base_rootfs.display()
+        ));
+    }
+
+    let shell = base_rootfs.join("bin").join("sh");
+    if shell.is_file() {
+        report
+            .checks
+            .push(format!("rootfs_shell: pass ({})", shell.display()));
+    } else {
+        rootfs_ok = false;
+        report
+            .checks
+            .push(format!("rootfs_shell: fail ({})", shell.display()));
+        report.problems.push(format!(
+            "base rootfs must contain a real /bin/sh at {}",
+            shell.display()
+        ));
+    }
+
+    let proc_dir = base_rootfs.join("proc");
+    if proc_dir.is_dir() {
+        report
+            .checks
+            .push(format!("rootfs_proc: pass ({})", proc_dir.display()));
+    } else {
+        rootfs_ok = false;
+        report
+            .checks
+            .push(format!("rootfs_proc: fail ({})", proc_dir.display()));
+        report.problems.push(format!(
+            "base rootfs must contain a /proc mount point directory at {}",
+            proc_dir.display()
+        ));
+    }
+
+    report.ok = report.ok && rootfs_ok;
+    report
+}
+
 #[cfg(windows)]
 fn wsl_capsule_doctor(distribution: &str) -> CapsuleHostDoctor {
     let probes = [
@@ -1045,6 +1112,64 @@ mod tests {
         let runtime = KoaRuntime::init(temp.path()).expect("init");
         assert!(runtime.paths().config.is_file());
         assert_eq!(runtime.list_sessions().expect("sessions").len(), 1);
+    }
+
+    #[test]
+    fn init_does_not_synthesize_base_rootfs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = KoaRuntime::init(temp.path()).expect("init");
+        assert!(!runtime.paths().capsules.join("base-rootfs").exists());
+    }
+
+    #[test]
+    fn capsule_doctor_reports_missing_base_rootfs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = KoaRuntime::init(temp.path()).expect("init");
+        let report = runtime.capsule_doctor().expect("capsule doctor");
+
+        assert!(!report.ok);
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|problem| problem.contains("base rootfs") && problem.contains("missing"))
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.starts_with("base_rootfs: fail"))
+        );
+    }
+
+    #[test]
+    fn capsule_doctor_checks_real_rootfs_markers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let runtime = KoaRuntime::init(temp.path()).expect("init");
+        let rootfs = runtime.paths().capsules.join("base-rootfs");
+        fs::create_dir_all(rootfs.join("bin")).expect("bin");
+        fs::write(rootfs.join("bin").join("sh"), b"#!/bin/sh\n").expect("shell");
+        fs::create_dir_all(rootfs.join("proc")).expect("proc");
+
+        let report = runtime.capsule_doctor().expect("capsule doctor");
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.starts_with("base_rootfs: pass"))
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.starts_with("rootfs_shell: pass"))
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.starts_with("rootfs_proc: pass"))
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ The first native slice contains:
 cargo run -p koa-cli -- init
 cargo run -p koa-cli -- doctor
 cargo run -p koa-cli -- model doctor
+cargo run -p koa-cli -- capsule doctor
 ```
 
 Useful commands:

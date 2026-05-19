@@ -24,6 +24,10 @@ enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    Capsule {
+        #[command(subcommand)]
+        command: CapsuleCommand,
+    },
     Session {
         #[command(subcommand)]
         command: SessionCommand,
@@ -69,6 +73,11 @@ enum ModelCommand {
         #[arg(long = "file")]
         files: Vec<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CapsuleCommand {
+    Doctor,
 }
 
 #[derive(Debug, Subcommand)]
@@ -191,6 +200,7 @@ fn main() -> Result<()> {
             );
         }
         Command::Model { command } => handle_model(&root, command)?,
+        Command::Capsule { command } => handle_capsule(&root, command)?,
         Command::Session { command } => handle_session(&root, command)?,
         Command::Vault { command } => handle_vault(&root, command)?,
         Command::Tools { command } => handle_tools(&root, command)?,
@@ -222,6 +232,20 @@ fn handle_model(root: &PathBuf, command: ModelCommand) -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&runtime.write_model_manifest(&revision, &files)?)?
             );
+        }
+    }
+    Ok(())
+}
+
+fn handle_capsule(root: &PathBuf, command: CapsuleCommand) -> Result<()> {
+    let runtime = KoaRuntime::open(root)?;
+    match command {
+        CapsuleCommand::Doctor => {
+            let report = runtime.capsule_doctor()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.ok {
+                std::process::exit(2);
+            }
         }
     }
     Ok(())
